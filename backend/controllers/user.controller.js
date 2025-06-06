@@ -82,7 +82,8 @@ const login = async (req, res) => {
     ApiResponse.error(res, [err.message], 500, "Failed to log in");
   }
 };
-// Resed OTP to mail
+
+// Resend OTP to mail
 const resendOTP = async (req, res) => {
   try {
     const { email } = req.body;
@@ -102,7 +103,7 @@ const resendOTP = async (req, res) => {
     if (emailStatus) {
       ApiResponse.success(res, {}, 200, "OTP sent successfully");
     } else {
-      throw Error;
+      throw new Error("Failed to send email");
     }
   } catch (error) {
     console.error(error);
@@ -144,7 +145,7 @@ const checkOTP = async (req, res) => {
         res,
         { verified: true },
         200,
-        "Email verified successfuly!"
+        "Email verified successfully!"
       );
     } else {
       return ApiResponse.error(
@@ -156,7 +157,7 @@ const checkOTP = async (req, res) => {
     }
   } catch (error) {
     console.error("Error while Checking OTP");
-    process.exit(1);
+    return ApiResponse.error(res, [], 500, "Internal Server Error");
   }
 };
 
@@ -165,7 +166,6 @@ const updatePassword = async (req, res) => {
   try {
     const { oldPassword, newPassword } = req.body;
 
-    // Validate inputs
     if (!oldPassword || !newPassword) {
       return ApiResponse.error(
         res,
@@ -175,21 +175,18 @@ const updatePassword = async (req, res) => {
       );
     }
 
-    const userId = req.user.userId; // userId is now in req.user from the authenticate middleware
+    const userId = req.user.userId;
 
-    // Fetch user by ID
     const user = await User.findById(userId);
     if (!user) {
       return ApiResponse.error(res, [], 404, "User not found");
     }
 
-    // Verify the old password
     const isOldPasswordValid = await bcrypt.compare(oldPassword, user.password);
     if (!isOldPasswordValid) {
       return ApiResponse.error(res, [], 401, "Old password is incorrect");
     }
 
-    // Hash and update the new password
     const hashedNewPassword = await bcrypt.hash(newPassword, 10);
     user.password = hashedNewPassword;
 
@@ -202,10 +199,9 @@ const updatePassword = async (req, res) => {
   }
 };
 
-// Forget Password (Send OTP)
+// Forget Password (Send OTP or Reset Password)
 const forgetPassword = async (req, res) => {
   const { email, otp, newPassword } = req.body;
-  // step-1 (send OTP in mail)
 
   if (!email) {
     return ApiResponse.error(
@@ -223,49 +219,50 @@ const forgetPassword = async (req, res) => {
       res,
       ["Resource Not Found"],
       404,
-      "The provided email is not registered. "
+      "The provided email is not registered."
     );
   }
 
   if (email && !otp) {
-    await resendOTP(req, res);
+    return await resendOTP(req, res);
   }
 
-  //step-2 (verify OTP with stored OTP)
-  else if (email && otp && newPassword) {
-    try {
-      const storedOTP = await getStoredOTP(email);
+  if (email && otp && newPassword) {
+    return await handleOtpPasswordReset(email, otp, newPassword, res);
+  }
 
-      if (!storedOTP) {
-        return ApiResponse.error(res, ["OTP expired!"], 404, "OTP expired!");
-      }
+  return ApiResponse.error(res, [], 409, "Required all details!");
+};
 
-      if (otp === storedOTP) {
-        const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+// Helper: Handles OTP verification and password reset
+const handleOtpPasswordReset = async (email, otp, newPassword, res) => {
+  try {
+    const storedOTP = await getStoredOTP(email);
 
-        const user = await User.findOneAndUpdate(
-          { email },
-          { $set: { password: hashedNewPassword } },
-          { new: true }
-        );
-
-        if (!user) {
-          return ApiResponse.error(
-            res,
-            ["User not found!"],
-            404,
-            "User not found!"
-          );
-        }
-      }
-      removeStoredOTP(email);
-      ApiResponse.success(res, {}, 200, "Password updated successfully");
-    } catch (error) {
-      return ApiResponse.error(res, [error], 500, error.message);
+    if (!storedOTP) {
+      return ApiResponse.error(res, ["OTP expired!"], 404, "OTP expired!");
     }
-  } else {
-    // send error for missing required details
-    return ApiResponse.error(res, [], 409, "Required all details!");
+
+    if (otp !== storedOTP) {
+      return ApiResponse.error(res, ["Invalid OTP"], 401, "OTP does not match");
+    }
+
+    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+
+    const user = await User.findOneAndUpdate(
+      { email },
+      { $set: { password: hashedNewPassword } },
+      { new: true }
+    );
+
+    if (!user) {
+      return ApiResponse.error(res, ["User not found!"], 404, "User not found!");
+    }
+
+    removeStoredOTP(email);
+    return ApiResponse.success(res, {}, 200, "Password updated successfully");
+  } catch (error) {
+    return ApiResponse.error(res, [error.message], 500, "Failed to update password");
   }
 };
 
@@ -281,8 +278,6 @@ const verifyEmail = async (req, res) => {
     if (existingUser) {
       return ApiResponse.error(res, [], 409, "Email already in use");
     }
-
-    // Send OTP to User's Email
 
     const otp = await generateOTP(email);
 
@@ -304,7 +299,7 @@ const verifyEmail = async (req, res) => {
       res,
       [err.message],
       500,
-      "Failed to sending verication OTP email"
+      "Failed to send verification OTP email"
     );
   }
 };
